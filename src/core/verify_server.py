@@ -7,6 +7,7 @@ Features:
 - Before/After badge display
 - Real-time verification status
 - Dynamic key verification via single QR code payload
+- NEW: Added a button in the HTML template to trigger device camera for QR code scanning.
 """
 
 from flask import Flask, request, jsonify, render_template_string
@@ -113,7 +114,7 @@ def verify_blockchain_integrity(cert_data):
         print(f"Blockchain verification error: {e}")
         return False
 
-# HTML template modified to handle the URL parameter
+# HTML template modified to handle the URL parameter and camera scan button
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -121,7 +122,7 @@ HTML_TEMPLATE = '''
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SecureWipe Certificate Verification Portal</title>
-    <style>
+    <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script> <style>
         /* ... CSS STYLES (AS IN ORIGINAL FILE) ... */
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
@@ -159,7 +160,6 @@ HTML_TEMPLATE = '''
             padding: 50px 40px;
             text-align: center;
             background: linear-gradient(135deg, #f8f9ff 0%, #f0f2ff 100%);
-            cursor: pointer;
             transition: all 0.3s ease;
         }
         
@@ -171,10 +171,17 @@ HTML_TEMPLATE = '''
         .upload-icon { font-size: 5em; margin-bottom: 25px; }
         .upload-section h2 { color: #667eea; margin-bottom: 15px; font-size: 1.8em; }
         
+        .upload-btn-group {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
         .upload-btn {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            padding: 15px 40px;
+            padding: 15px 25px;
             border: none;
             border-radius: 30px;
             font-size: 1.1em;
@@ -182,6 +189,7 @@ HTML_TEMPLATE = '''
             cursor: pointer;
             transition: all 0.3s;
             box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+            min-width: 200px;
         }
         
         .upload-btn:hover { transform: translateY(-3px); }
@@ -417,12 +425,20 @@ HTML_TEMPLATE = '''
         </div>
 
         <div class="content">
-            <div class="upload-section" id="uploadSection" onclick="document.getElementById('fileInput').click()">
+            <div class="upload-section" id="uploadSection">
                 <div class="upload-icon">📄</div>
-                <h2>Upload or Scan Certificate QR Code</h2>
-                <p>If scanning the QR code failed, manually upload the certificate JSON file.</p>
-                <button class="upload-btn">Choose Certificate File</button>
+                <h2>Verify Certificate by Upload or Scan</h2>
+                <p>Use the camera to scan the QR code on the physical certificate, or upload the JSON file.</p>
+                <div class="upload-btn-group">
+                    <button class="upload-btn" onclick="document.getElementById('cameraInput').click()">
+                        <span style="font-size: 1.2em; margin-right: 5px;">📷</span> Scan QR with Camera
+                    </button>
+                    <button class="upload-btn" onclick="document.getElementById('fileInput').click()">
+                        <span style="font-size: 1.2em; margin-right: 5px;">📁</span> Upload JSON File
+                    </button>
+                </div>
                 <input type="file" id="fileInput" accept=".json" style="display:none;">
+                <input type="file" id="cameraInput" accept="image/*" capture="environment" style="display:none;">
             </div>
 
             <div class="loading" id="loading">
@@ -506,6 +522,69 @@ HTML_TEMPLATE = '''
     <script>
         let currentCertData = null;
         let currentPublicKey = null;
+        
+        // --- Core QR Processing Function (Client Side) ---
+        function decodeImageQR(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        try {
+                            // Create a canvas element to get image data
+                            const canvas = document.createElement('canvas');
+                            canvas.width = img.width;
+                            canvas.height = img.height;
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(img, 0, 0, img.width, img.height);
+                            
+                            const imageData = ctx.getImageData(0, 0, img.width, img.height);
+                            // Use the jsqr library imported in the head
+                            const code = jsQR(imageData.data, imageData.width, imageData.height);
+                            
+                            if (code) {
+                                // QR code data format is expected to be 'http://<url>/verify?data=<base64>'
+                                const urlMatch = code.data.match(/data=(.*)/);
+                                if (urlMatch && urlMatch[1]) {
+                                    resolve(urlMatch[1]); // Resolve with just the base64 payload
+                                } else {
+                                    reject(new Error("QR code content is not a valid SecureWipe verification URL."));
+                                }
+                            } else {
+                                reject(new Error("No QR code found in the image."));
+                            }
+                        } catch (err) {
+                            reject(new Error("Error processing image for QR code: " + err.message));
+                        }
+                    };
+                    img.src = e.target.result;
+                };
+                reader.onerror = (e) => reject(new Error("Failed to read file."));
+                reader.readAsDataURL(file);
+            });
+        }
+        // ------------------------------------------------
+        
+        // --- Handle Camera Scan ---
+        document.getElementById('cameraInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            document.getElementById('loading').classList.add('active');
+            document.getElementById('uploadSection').style.display = 'none';
+
+            try {
+                // 1. Decode QR code from the captured image
+                const qrPayload = await decodeImageQR(file);
+                
+                // 2. Start verification with the extracted payload
+                await startVerification(qrPayload, 'qr');
+                
+            } catch (error) {
+                alert('QR Code Scan Failed: ' + error.message);
+                resetVerification();
+            }
+        });
 
         // --- Handle Manual File Upload ---
         document.getElementById('fileInput').addEventListener('change', async (e) => {
@@ -741,8 +820,10 @@ HTML_TEMPLATE = '''
         
         function resetVerification() {
             document.getElementById('uploadSection').style.display = 'block';
+            document.getElementById('loading').classList.remove('active');
             document.getElementById('verificationStages').classList.remove('active');
             document.getElementById('fileInput').value = '';
+            document.getElementById('cameraInput').value = '';
             document.getElementById('progressBar').style.width = '0%';
             
             ['stage1', 'stage2', 'stage3', 'stage4'].forEach(stageId => {
@@ -810,6 +891,7 @@ def verify_certificate_api():
         # If public_key_content is None (e.g., manual upload), load the server's local key as a fallback
         if not public_key_content:
              # This loads the key from the local public.pem file
+             # Navigates up two levels from src/core/ to the root
              key_paths = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'public.pem')
              if os.path.exists(key_paths):
                  with open(key_paths, 'r') as f:
